@@ -90,7 +90,7 @@ class UnsupportedTypeError(InvalidDefinitionError):
         return "Unsupported C++ type: " + repr(self.type_name)
 
 
-NOESCAPE_CHARACTERS = bytes(string.digits + string.ascii_letters + ' ')
+NOESCAPE_CHARACTERS = bytes(string.digits + string.ascii_letters + ' ' + '-')
 
 
 def cstring_literal(byte_string):
@@ -194,11 +194,33 @@ class ClassDefinitionCodeGenerator(object):
             member_flag_settings=''.join(m.add_property_statement('h') for m in self.class_info.members)
         )
 
-    def class_definition(self):
-        class_def = 'struct {name} {{\n {declarations}\n\n{constructor}\n{staticjson_init}\n \n}};' \
-            .format(name=self.class_info.name, declarations=self.member_declarations(),
+    def operator(self):
+        class_type = self.class_info.name
+        return """
+            friend std::ostream& operator<<(std::ostream& o, const {class_type} & obj) {{
+                {member_flag_settings}
+                return o;\n
+             }}
+         """.format(
+            class_type=class_type,
+            member_flag_settings=''.join(m.add_operator_statement('o','obj', m.type_name) for m in self.class_info.members)
+        )
+
+    def class_definition(self, last_record):
+        if last_record:
+            name = "{}: public MsgPacker::JsonParser<{}>".format(self.class_info.name, self.class_info.name)
+        else:
+            name = self.class_info.name
+        access_spec = "public:"
+
+        class_def = 'class {name} {{\n {access_spec}\n{declarations}\n\n{constructor}\n{staticjson_init}\n{operator}}};' \
+            .format(name=name,
+                    access_spec=access_spec,
+                    declarations=self.member_declarations(),
                     constructor=self.constructor(),
-                    staticjson_init=self.staticjson_init())
+                    staticjson_init=self.staticjson_init(),
+                    operator = self.operator()
+                    )
 
         if self.class_info.namespace is not None:
             for space in reversed(self.class_info.namespace.split('::')):
@@ -264,6 +286,16 @@ class MemberInfo(object):
             handler_name, cstring_literal(self.json_key), self.variable_name,
             'staticjson::Flags::Default' if self.is_required else 'staticjson::Flags::Optional')
 
+    def add_operator_statement(self, handler_name, obj, type_name):
+        if (type_name.find("vector") != -1):
+            return 'for (auto& id : {obj}.{member})\n{handler_name}<<"{json_key}:"<<id<<std::endl;\n '.format(
+                         handler_name = handler_name, json_key=self.json_key, obj=obj,member=self.variable_name)
+        if (type_name.find("map") != -1):
+            return 'for (auto& id : {obj}.{member})\n{handler_name}<<"{json_key}:"<<id.first<<" => "<<id.second<<std::endl;\n '.format(
+                         handler_name = handler_name, json_key=self.json_key, obj=obj,member=self.variable_name)
+        return '{handler_name}<<"{json_key}:"<<{obj}.{member}<<std::endl;\n '.format(
+                         handler_name = handler_name, json_key=self.json_key, obj=obj,member=self.variable_name)
+
     @staticmethod
     def cpp_repr(args):
         if args is None:
@@ -303,23 +335,40 @@ def main():
 
     if args.output is None:
         args.output = os.path.basename(args.input)
-        args.output = os.path.splitext(args.output)[0] + '.hpp'
+        args.output = os.path.splitext(args.output)[0] + '.h'
 
     raw_record = json.loads(read_utf8(args.input))
 
     with io.open(args.output, 'w', encoding='utf-8') as output:
-        output.write('#pragma once\n\n')
+        output.write("/**\n * \u00a9 2018 OpenSource.\n */ \n \n")
+        if isinstance(raw_record, list):
+           last_record = raw_record[-1]
+        else:
+           last_record = raw_record
+        class_obj = ClassInfo(last_record)
+        class_name = class_obj._name.upper()
+        class_name = class_name + '_H'
 
-        def output_class(class_record):
-            output.write(ClassDefinitionCodeGenerator(ClassInfo(class_record)).class_definition())
-            output.write('\n\n')
+        output.write('#ifndef ')
+        output.write(class_name)
+
+        output.write('\n #define ')
+        output.write(class_name)
+        output.write('\n\n #include "JsonParser.h" \n')
+
+        def output_class(class_record, last_record):
+            output.write(ClassDefinitionCodeGenerator(ClassInfo(class_record)).class_definition(last_record))
+            output.write('\n')
 
         if isinstance(raw_record, list):
-            for r in raw_record:
-                output_class(r)
+            for r in raw_record[:-1]:
+                output_class(r,False)
+            print("last record : \n",raw_record[-1])
+            output_class(raw_record[-1], True)
         else:
-            output_class(raw_record)
+            output_class(raw_record, True)
 
+        output.write('#endif')
 
 if __name__ == '__main__':
     main()
